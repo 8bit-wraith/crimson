@@ -94,3 +94,53 @@ async fn process_pdf_from_status(mut status: DocStatus) -> anyhow::Result<()> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::logic::get_task_data_from_id;
+    use crate::types::FileLocation;
+
+    // Isolate the global store and provide synthetic configuration in a child
+    // test process. LocalPath never contacts S3; no process-global env mutation.
+    #[tokio::test]
+    async fn unsupported_ocr_records_error_in_status_store() {
+        const CHILD: &str = "CRIMSON_OCR_REGRESSION_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "processing::worker::tests::unsupported_ocr_records_error_in_status_store",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("S3_ACCESS_KEY", "synthetic-test-only")
+                .env("S3_SECRET_KEY", "synthetic-test-only")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        for (id, method) in [
+            (u64::MAX - 1, MarkdownConversionMethod::OlmOcr),
+            (u64::MAX - 2, MarkdownConversionMethod::Marker),
+        ] {
+            let status = DocStatus::new_from_id_loc(
+                id,
+                FileLocation::LocalPath("unused-synthetic.pdf".into()),
+                method,
+            );
+            assert!(process_pdf_from_status(status).await.is_err());
+            let recorded = get_task_data_from_id(id).await.unwrap();
+            assert_eq!(recorded.status, ProcessingStage::Errored);
+            assert_eq!(recorded.request_id, id);
+            assert!(recorded.error.unwrap().contains("Not Implemented"));
+            assert!(recorded.markdown.is_none());
+        }
+    }
+}
